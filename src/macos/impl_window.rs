@@ -181,15 +181,12 @@ impl ImplWindow {
             }
 
             // Filter out StatusIndicator from Window Server (same as original)
-            if let Some(title) = window.title() {
-                if title == "StatusIndicator" {
-                    if let Some(app) = window.owning_application() {
-                        if app.application_name() == "Window Server" {
+            if let Some(title) = window.title()
+                && title == "StatusIndicator"
+                    && let Some(app) = window.owning_application()
+                        && app.application_name() == "Window Server" {
                             continue;
                         }
-                    }
-                }
-            }
 
             impl_windows.push(ImplWindow::new(window.window_id()));
         }
@@ -205,13 +202,11 @@ impl ImplWindow {
 
     pub fn pid(&self) -> XCapResult<u32> {
         // Try SCShareableContent first
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
-                if let Some(app) = window.owning_application() {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id)
+                && let Some(app) = window.owning_application() {
                     return Ok(app.process_id() as u32);
                 }
-            }
-        }
 
         // Fallback to CGWindowList
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
@@ -221,16 +216,14 @@ impl ImplWindow {
 
     pub fn app_name(&self) -> XCapResult<String> {
         // Try SCShareableContent first
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
-                if let Some(app) = window.owning_application() {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id)
+                && let Some(app) = window.owning_application() {
                     let name = app.application_name();
                     if !name.is_empty() {
                         return Ok(name);
                     }
                 }
-            }
-        }
 
         // Fallback to CGWindowList
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
@@ -239,13 +232,11 @@ impl ImplWindow {
 
     pub fn title(&self) -> XCapResult<String> {
         // Try SCShareableContent first
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
-                if let Some(title) = window.title() {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id)
+                && let Some(title) = window.title() {
                     return Ok(title);
                 }
-            }
-        }
 
         // Fallback to CGWindowList
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
@@ -280,11 +271,10 @@ impl ImplWindow {
 
     pub fn x(&self) -> XCapResult<i32> {
         // Try SCShareableContent first
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
                 return Ok(window.frame().x as i32);
             }
-        }
 
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
@@ -292,11 +282,10 @@ impl ImplWindow {
     }
 
     pub fn y(&self) -> XCapResult<i32> {
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
                 return Ok(window.frame().y as i32);
             }
-        }
 
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
@@ -342,11 +331,10 @@ impl ImplWindow {
     }
 
     pub fn width(&self) -> XCapResult<u32> {
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
                 return Ok(window.frame().width as u32);
             }
-        }
 
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
@@ -354,11 +342,10 @@ impl ImplWindow {
     }
 
     pub fn height(&self) -> XCapResult<u32> {
-        if let Ok(content) = SCShareableContent::get() {
-            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+        if let Ok(content) = SCShareableContent::get()
+            && let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
                 return Ok(window.frame().height as u32);
             }
-        }
 
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;

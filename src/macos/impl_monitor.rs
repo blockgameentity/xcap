@@ -7,16 +7,17 @@ use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsActive,
     CGDisplayIsBuiltin, CGDisplayIsMain, CGDisplayMode, CGDisplayModelNumber, CGDisplayRotation,
-    CGError, CGGetActiveDisplayList, CGGetDisplaysWithPoint, CGWindowListOption,
+    CGError, CGGetActiveDisplayList, CGGetDisplaysWithPoint,
 };
 use objc2_foundation::{NSNumber, NSString};
+use screencapturekit::shareable_content::SCShareableContent;
 
 use crate::{
     error::{XCapError, XCapResult},
     video_recorder::Frame,
 };
 
-use super::{capture::capture, impl_video_recorder::ImplVideoRecorder};
+use super::{capture, impl_video_recorder::ImplVideoRecorder};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImplMonitor {
@@ -54,31 +55,47 @@ impl ImplMonitor {
         }
     }
     pub fn all() -> XCapResult<Vec<ImplMonitor>> {
-        let max_displays: u32 = 16;
-        let mut active_displays: Vec<CGDirectDisplayID> = vec![0; max_displays as usize];
-        let mut display_count: u32 = 0;
+        // Use SCShareableContent to enumerate displays
+        let content = SCShareableContent::get()
+            .map_err(|e| XCapError::ScreenCaptureKit(e.to_string()))?;
 
-        let cg_error = unsafe {
-            CGGetActiveDisplayList(
-                max_displays,
-                active_displays.as_mut_ptr(),
-                &mut display_count,
-            )
-        };
+        let displays = content.displays();
+        let mut impl_monitors = Vec::with_capacity(displays.len());
 
-        if cg_error != CGError::Success {
-            return Err(XCapError::new(format!(
-                "CGGetActiveDisplayList failed: {:?}",
-                cg_error
-            )));
+        for display in displays {
+            let display_id = display.display_id();
+            // Only include active displays
+            if CGDisplayIsActive(display_id) {
+                impl_monitors.push(ImplMonitor::new(display_id));
+            }
         }
 
-        active_displays.truncate(display_count as usize);
+        // Fallback to CGGetActiveDisplayList if SCShareableContent returns empty
+        if impl_monitors.is_empty() {
+            let max_displays: u32 = 16;
+            let mut active_displays: Vec<CGDirectDisplayID> = vec![0; max_displays as usize];
+            let mut display_count: u32 = 0;
 
-        let mut impl_monitors = Vec::with_capacity(active_displays.len());
+            let cg_error = unsafe {
+                CGGetActiveDisplayList(
+                    max_displays,
+                    active_displays.as_mut_ptr(),
+                    &mut display_count,
+                )
+            };
 
-        for display in active_displays {
-            impl_monitors.push(ImplMonitor::new(display));
+            if cg_error != CGError::Success {
+                return Err(XCapError::new(format!(
+                    "CGGetActiveDisplayList failed: {:?}",
+                    cg_error
+                )));
+            }
+
+            active_displays.truncate(display_count as usize);
+
+            for display in active_displays {
+                impl_monitors.push(ImplMonitor::new(display));
+            }
         }
 
         Ok(impl_monitors)
@@ -203,9 +220,11 @@ impl ImplMonitor {
     }
 
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
-        let cg_rect = CGDisplayBounds(self.cg_direct_display_id);
+        let scale = self.scale_factor()?;
+        let width = (self.width()? as f32 * scale) as u32;
+        let height = (self.height()? as f32 * scale) as u32;
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture::capture_display(self.cg_direct_display_id, width, height)
     }
 
     pub fn capture_region(&self, x: u32, y: u32, width: u32, height: u32) -> XCapResult<RgbaImage> {
@@ -226,19 +245,16 @@ impl ImplMonitor {
             )));
         }
 
-        // Create a CGRect for the region to capture
-        let cg_rect = objc2_core_foundation::CGRect {
-            origin: objc2_core_foundation::CGPoint {
-                x: (monitor_x + x as i32) as f64,
-                y: (monitor_y + y as i32) as f64,
-            },
-            size: objc2_core_foundation::CGSize {
-                width: width as f64,
-                height: height as f64,
-            },
-        };
+        let scale = self.scale_factor()?;
 
-        capture(cg_rect, CGWindowListOption::OptionAll, 0)
+        capture::capture_display_region(
+            self.cg_direct_display_id,
+            x,
+            y,
+            width,
+            height,
+            scale,
+        )
     }
 
     pub fn video_recorder(&self) -> XCapResult<(ImplVideoRecorder, Receiver<Frame>)> {

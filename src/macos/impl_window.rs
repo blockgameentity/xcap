@@ -11,10 +11,11 @@ use objc2_core_graphics::{
     CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
+use screencapturekit::shareable_content::SCShareableContent;
 
 use crate::{XCapError, error::XCapResult};
 
-use super::{capture::capture, impl_monitor::ImplMonitor};
+use super::{capture, impl_monitor::ImplMonitor};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImplWindow {
@@ -95,7 +96,7 @@ fn get_window_cg_rect(window_cf_dictionary: &CFDictionary) -> XCapResult<CGRect>
     }
 }
 
-fn get_window_id(window_cf_dictionary: &CFDictionary) -> XCapResult<u32> {
+fn get_window_id_from_dict(window_cf_dictionary: &CFDictionary) -> XCapResult<u32> {
     let window_name = get_cf_string_value(window_cf_dictionary, "kCGWindowName")?;
 
     let window_owner_name = get_cf_string_value(window_cf_dictionary, "kCGWindowOwnerName")?;
@@ -118,8 +119,6 @@ fn get_window_id(window_cf_dictionary: &CFDictionary) -> XCapResult<u32> {
 
 pub fn get_window_cf_dictionary(window_id: u32) -> XCapResult<CFRetained<CFDictionary>> {
     unsafe {
-        // CGWindowListCopyWindowInfo 返回窗口顺序为从顶层到最底层
-        // 即在前面的窗口在数组前面
         let cf_array = match CGWindowListCopyWindowInfo(
             CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
             0,
@@ -138,7 +137,7 @@ pub fn get_window_cf_dictionary(window_id: u32) -> XCapResult<CFRetained<CFDicti
             }
             let window_cf_dictionary = &*window_cf_dictionary_ref;
 
-            let current_window_id = match get_window_id(window_cf_dictionary) {
+            let current_window_id = match get_window_id_from_dict(window_cf_dictionary) {
                 Ok(val) => val,
                 Err(_) => continue,
             };
@@ -159,47 +158,43 @@ impl ImplWindow {
     }
 
     pub fn all() -> XCapResult<Vec<ImplWindow>> {
-        unsafe {
-            if !CGPreflightScreenCaptureAccess() {
-                log::warn!(
-                    "Screen Recording permission not granted. \
-                     Grant access in System Settings > Privacy & Security > Screen Recording"
-                );
-            }
-
-            let mut impl_window = Vec::new();
-
-            // CGWindowListCopyWindowInfo 返回窗口顺序为从顶层到最底层
-            // 即在前面的窗口在数组前面
-            let cf_array = match CGWindowListCopyWindowInfo(
-                CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
-                0,
-            ) {
-                Some(cf_array) => cf_array,
-                None => return Ok(impl_window),
-            };
-
-            let windows_count = cf_array.count();
-
-            for i in 0..windows_count {
-                let window_cf_dictionary_ref = cf_array.value_at_index(i) as *const CFDictionary;
-
-                if window_cf_dictionary_ref.is_null() {
-                    continue;
-                }
-
-                let window_cf_dictionary = &*window_cf_dictionary_ref;
-
-                let window_id = match get_window_id(window_cf_dictionary) {
-                    Ok(window_id) => window_id,
-                    Err(_) => continue,
-                };
-
-                impl_window.push(ImplWindow::new(window_id));
-            }
-
-            Ok(impl_window)
+        if !CGPreflightScreenCaptureAccess() {
+            log::warn!(
+                "Screen Recording permission not granted. \
+                 Grant access in System Settings > Privacy & Security > Screen Recording"
+            );
         }
+
+        // Use SCShareableContent for window enumeration
+        let content = SCShareableContent::create()
+            .with_on_screen_windows_only(true)
+            .with_exclude_desktop_windows(true)
+            .get()
+            .map_err(|e| XCapError::ScreenCaptureKit(e.to_string()))?;
+
+        let sc_windows = content.windows();
+        let mut impl_windows = Vec::new();
+
+        for window in &sc_windows {
+            if !window.is_on_screen() {
+                continue;
+            }
+
+            // Filter out StatusIndicator from Window Server (same as original)
+            if let Some(title) = window.title() {
+                if title == "StatusIndicator" {
+                    if let Some(app) = window.owning_application() {
+                        if app.application_name() == "Window Server" {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            impl_windows.push(ImplWindow::new(window.window_id()));
+        }
+
+        Ok(impl_windows)
     }
 }
 
@@ -209,22 +204,51 @@ impl ImplWindow {
     }
 
     pub fn pid(&self) -> XCapResult<u32> {
+        // Try SCShareableContent first
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                if let Some(app) = window.owning_application() {
+                    return Ok(app.process_id() as u32);
+                }
+            }
+        }
+
+        // Fallback to CGWindowList
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
         let pid = get_cf_number_i32_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerPID")?;
-
         Ok(pid as u32)
     }
 
     pub fn app_name(&self) -> XCapResult<String> {
-        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
+        // Try SCShareableContent first
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                if let Some(app) = window.owning_application() {
+                    let name = app.application_name();
+                    if !name.is_empty() {
+                        return Ok(name);
+                    }
+                }
+            }
+        }
 
+        // Fallback to CGWindowList
+        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowOwnerName")
     }
 
     pub fn title(&self) -> XCapResult<String> {
-        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
+        // Try SCShareableContent first
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                if let Some(title) = window.title() {
+                    return Ok(title);
+                }
+            }
+        }
 
+        // Fallback to CGWindowList
+        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         get_cf_string_value(window_cf_dictionary.as_ref(), "kCGWindowName")
     }
 
@@ -232,7 +256,6 @@ impl ImplWindow {
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
 
-        // 获取窗口中心点的坐标
         let window_center_x = cg_rect.origin.x + cg_rect.size.width / 2.0;
         let window_center_y = cg_rect.origin.y + cg_rect.size.height / 2.0;
         let cg_point = CGPoint {
@@ -256,25 +279,33 @@ impl ImplWindow {
     }
 
     pub fn x(&self) -> XCapResult<i32> {
+        // Try SCShareableContent first
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                return Ok(window.frame().x as i32);
+            }
+        }
+
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-
         Ok(cg_rect.origin.x as i32)
     }
 
     pub fn y(&self) -> XCapResult<i32> {
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                return Ok(window.frame().y as i32);
+            }
+        }
+
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-
         Ok(cg_rect.origin.y as i32)
     }
 
     pub fn z(&self) -> XCapResult<i32> {
+        // z-order is not available from SCShareableContent, use CGWindowList
         unsafe {
-            // CGWindowListCopyWindowInfo 返回窗口顺序为从顶层到最底层
-            // 即在前面的窗口在数组前面
             let cf_array = match CGWindowListCopyWindowInfo(
                 CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
                 0,
@@ -296,7 +327,7 @@ impl ImplWindow {
 
                 let window_cf_dictionary = &*window_cf_dictionary_ref;
 
-                let window_id = match get_window_id(window_cf_dictionary) {
+                let window_id = match get_window_id_from_dict(window_cf_dictionary) {
                     Ok(window_id) => window_id,
                     Err(_) => continue,
                 };
@@ -311,18 +342,26 @@ impl ImplWindow {
     }
 
     pub fn width(&self) -> XCapResult<u32> {
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                return Ok(window.frame().width as u32);
+            }
+        }
+
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-
         Ok(cg_rect.size.width as u32)
     }
 
     pub fn height(&self) -> XCapResult<u32> {
+        if let Ok(content) = SCShareableContent::get() {
+            if let Some(window) = content.windows().into_iter().find(|w| w.window_id() == self.window_id) {
+                return Ok(window.frame().height as u32);
+            }
+        }
+
         let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
         let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-
         Ok(cg_rect.size.height as u32)
     }
 
@@ -355,9 +394,6 @@ impl ImplWindow {
 
         let workspace = NSWorkspace::sharedWorkspace();
 
-        // activeApplication is deprecated, but the alternative, frontmostApplication,
-        // returns the application in focus when the process started while activeApplication
-        // returns a `NSDictionary` of application currently in focus, in real-time
         let active_app_dictionary = workspace.activeApplication();
 
         let active_app_pid = active_app_dictionary
@@ -373,14 +409,6 @@ impl ImplWindow {
     }
 
     pub fn capture_image(&self) -> XCapResult<RgbaImage> {
-        let window_cf_dictionary = get_window_cf_dictionary(self.window_id)?;
-
-        let cg_rect = get_window_cg_rect(window_cf_dictionary.as_ref())?;
-
-        capture(
-            cg_rect,
-            CGWindowListOption::OptionIncludingWindow,
-            self.window_id,
-        )
+        capture::capture_window(self.window_id)
     }
 }
